@@ -1,51 +1,22 @@
-# xiaozhi-music-railway
+# XiaoZhi Music Bridge
 
-Real music MCP WebSocket server for XiaoZhi AI — multi-platform music search & playable URLs via Meting.
+Cloud bridge between the XiaoZhi MCP endpoint and an existing Music MCP WebSocket server.
 
-## Supported Platforms
-- **Netease** — 网易云音乐 (music.163.com)
-- **Tencent** — QQ音乐 (y.qq.com)
-- **Kugou** — 酷狗音乐 (kugou.com)
-- **Kuwo** — 酷我音乐 (kuwo.cn)
+## Environment variables
 
-## MCP Tools (JSON-RPC over WebSocket)
+- `XIAOZHI_MCP_URL` = your private XiaoZhi MCP WebSocket endpoint
+- `MUSIC_MCP_URL` = your Music MCP WebSocket URL
 
-| Tool | Description |
-|------|-------------|
-| `platforms` | List supported music platforms |
-| `search` | Search songs/albums/artists by keyword |
-| `song` | Get song details by ID |
-| `url` | Get **playable audio URL** by song ID |
-| `album` | Get album details by ID |
-| `artist` | Get artist works by ID |
-| `playlist` | Get playlist by ID |
-| `lyric` | Get lyrics by song ID |
-| `pic` | Get cover image URL |
+Example:
 
-## Deploy on Railway
+`MUSIC_MCP_URL=wss://your-music-service.up.railway.app`
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new)
+The bridge connects OUTBOUND to both servers and transparently forwards MCP JSON-RPC messages.
 
-1. Fork/push this repo to GitHub
-2. Railway → New Project → Deploy from GitHub repo
-3. Auto-detects Node.js, auto-deploys
-4. Copy the domain → `wss://your-app.up.railway.app`
+## Railway
 
-## Environment Variables (optional)
+Deploy this repository as a Node.js service. Railway supplies `PORT` automatically.
 
-For higher quality audio, set platform cookies:
+Health endpoint:
 
-- `METING_NETEASE_COOKIE` — Netease Cloud Music cookies
-- `METING_TENCENT_COOKIE` — Tencent QQ Music cookies
-- `METING_KUGOU_COOKIE` — KuGou Music cookies
-- `METING_KUWO_COOKIE` — Kuwo Music cookies
-- `METING_COOKIE` — fallback cookie for all platforms
-
-## XiaoZhi MCP Configuration
-
-Add to your XiaoZhi MCP config:
-```json
-{
-  "endpoint": "wss://your-app.up.railway.app"
-}
-```
+`/health`
