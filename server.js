@@ -1,61 +1,58 @@
 #!/usr/bin/env node
 /**
- * xiaozhi-music-railway
- * Music MCP server + optional outbound XiaoZhi MCP bridge.
+ * xiaozhi-music-railway — Real music MCP WebSocket server
  *
- * Env:
- *   PORT=Railway supplied port
- *   XIAOZHI_MCP_URL=wss://api.xiaozhi.me/mcp/?token=...
+ * Uses Meting (metowolf/Meting) to search and fetch playable URLs
+ * from Netease, Tencent/QQ, Kugou, and Kuwo music platforms.
  *
- * The existing WebSocket MCP music server remains available on PORT.
- * When XIAOZHI_MCP_URL is set, this process also connects OUTBOUND
- * to XiaoZhi and exposes the same music tools there.
+ * Protocol: MCP JSON-RPC 2.0 over WebSocket
+ * Designed for Railway.app deployment (env PORT)
  */
-import { WebSocketServer, WebSocket } from 'ws';
-import http from 'http';
+import { WebSocketServer } from 'ws';
 import Meting from './lib/meting/meting.js';
 
+// ─── Config ────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const HOST = process.env.HOST || '0.0.0.0';
-const XIAOZHI_MCP_URL = process.env.XIAOZHI_MCP_URL || process.env.MCP_ENDPOINT || '';
 
+// ─── Meting client factory ──────────────────────────────────────
 function createClient(platform) {
   const meting = new Meting(platform);
   meting.format(true);
+
+  // Optional cookies from env
   const cookieVar = `METING_${platform.toUpperCase()}_COOKIE`;
   const cookie = process.env[cookieVar] || process.env.METING_COOKIE;
-  if (cookie) meting.cookie(cookie);
+  if (cookie) {
+    meting.cookie(cookie);
+  }
+
   return meting;
 }
 
+// ─── Tool definitions ───────────────────────────────────────────
 const PLATFORMS = ['netease', 'tencent', 'kugou', 'kuwo'];
 
 const TOOLS = [
   {
     name: 'platforms',
-    description: 'List supported music platforms.',
+    description: 'List supported music platforms (netease, tencent, kugou, kuwo).',
     inputSchema: { type: 'object', properties: {} },
-    handler: async () => JSON.stringify({
-      ok: true,
-      data: PLATFORMS.map(p => ({
+    handler: async () => {
+      return JSON.stringify({ ok: true, data: PLATFORMS.map(p => ({
         code: p,
-        name: {
-          netease: 'NetEase Cloud Music',
-          tencent: 'Tencent QQ Music',
-          kugou: 'KuGou Music',
-          kuwo: 'Kuwo Music'
-        }[p]
-      }))
-    }, null, 2)
+        name: { netease: 'NetEase Cloud Music', tencent: 'Tencent QQ Music', kugou: 'KuGou Music', kuwo: 'Kuwo Music' }[p]
+      }))}, null, 2);
+    }
   },
   {
     name: 'search',
-    description: 'Search songs, albums or artists on a music platform.',
+    description: 'Search songs, albums or artists on a specific music platform.',
     inputSchema: {
       type: 'object',
       properties: {
         platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
-        keyword: { type: 'string', description: 'Song or artist name' },
+        keyword: { type: 'string', description: 'Search keyword (song/artist name)' },
         page: { type: 'integer', description: 'Page number', default: 1 },
         limit: { type: 'integer', description: 'Results per page', default: 20 }
       },
@@ -76,30 +73,32 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        platform: { type: 'string', enum: PLATFORMS },
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
         id: { type: 'string', description: 'Song ID' }
       },
       required: ['platform', 'id']
     },
     handler: async (args) => {
-      const raw = await createClient(args.platform).song(args.id);
+      const client = createClient(args.platform);
+      const raw = await client.song(args.id);
       return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
     }
   },
   {
     name: 'url',
-    description: 'Get a playable audio URL for a song by ID.',
+    description: 'Get playable audio URL for a song by ID.',
     inputSchema: {
       type: 'object',
       properties: {
-        platform: { type: 'string', enum: PLATFORMS },
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
         id: { type: 'string', description: 'Song ID' },
-        br: { type: 'integer', description: 'Bitrate', default: 320 }
+        br: { type: 'integer', description: 'Bitrate (e.g. 128, 320)', default: 320 }
       },
       required: ['platform', 'id']
     },
     handler: async (args) => {
-      const raw = await createClient(args.platform).url(args.id, args.br || 320);
+      const client = createClient(args.platform);
+      const raw = await client.url(args.id, args.br || 320);
       return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
     }
   },
@@ -109,13 +108,14 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        platform: { type: 'string', enum: PLATFORMS },
-        id: { type: 'string' }
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Album ID' }
       },
       required: ['platform', 'id']
     },
     handler: async (args) => {
-      const raw = await createClient(args.platform).album(args.id);
+      const client = createClient(args.platform);
+      const raw = await client.album(args.id);
       return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
     }
   },
@@ -125,14 +125,15 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        platform: { type: 'string', enum: PLATFORMS },
-        id: { type: 'string' },
-        limit: { type: 'integer', default: 50 }
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Artist ID' },
+        limit: { type: 'integer', description: 'Max results', default: 50 }
       },
       required: ['platform', 'id']
     },
     handler: async (args) => {
-      const raw = await createClient(args.platform).artist(args.id, args.limit || 50);
+      const client = createClient(args.platform);
+      const raw = await client.artist(args.id, args.limit || 50);
       return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
     }
   },
@@ -142,13 +143,14 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        platform: { type: 'string', enum: PLATFORMS },
-        id: { type: 'string' }
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Playlist ID' }
       },
       required: ['platform', 'id']
     },
     handler: async (args) => {
-      const raw = await createClient(args.platform).playlist(args.id);
+      const client = createClient(args.platform);
+      const raw = await client.playlist(args.id);
       return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
     }
   },
@@ -158,35 +160,38 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        platform: { type: 'string', enum: PLATFORMS },
-        id: { type: 'string' }
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Song ID' }
       },
       required: ['platform', 'id']
     },
     handler: async (args) => {
-      const raw = await createClient(args.platform).lyric(args.id);
+      const client = createClient(args.platform);
+      const raw = await client.lyric(args.id);
       return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
     }
   },
   {
     name: 'pic',
-    description: 'Get cover image URL by resource ID.',
+    description: 'Get cover/picture URL by resource ID.',
     inputSchema: {
       type: 'object',
       properties: {
-        platform: { type: 'string', enum: PLATFORMS },
-        id: { type: 'string' },
-        size: { type: 'integer', default: 300 }
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Picture/resource ID' },
+        size: { type: 'integer', description: 'Image size in pixels', default: 300 }
       },
       required: ['platform', 'id']
     },
     handler: async (args) => {
-      const raw = await createClient(args.platform).pic(args.id, args.size || 300);
+      const client = createClient(args.platform);
+      const raw = await client.pic(args.id, args.size || 300);
       return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
     }
   }
 ];
 
+// ─── MCP JSON-RPC handler ───────────────────────────────────────
 async function handleMessage(data) {
   const { id, method, params = {} } = data;
 
@@ -194,29 +199,19 @@ async function handleMessage(data) {
     switch (method) {
       case 'initialize':
         return {
-          jsonrpc: '2.0',
-          id,
+          jsonrpc: '2.0', id,
           result: {
             protocolVersion: '2024-11-05',
             capabilities: { tools: { listChanged: true } },
-            serverInfo: { name: 'xiaozhi-music-railway', version: '1.1.0-xiaozhi-bridge' }
+            serverInfo: { name: 'xiaozhi-music-railway', version: '1.0.0' }
           }
         };
 
-      case 'notifications/initialized':
-      case 'ping':
-        return id == null ? null : { jsonrpc: '2.0', id, result: {} };
-
       case 'tools/list':
         return {
-          jsonrpc: '2.0',
-          id,
+          jsonrpc: '2.0', id,
           result: {
-            tools: TOOLS.map(t => ({
-              name: t.name,
-              description: t.description,
-              inputSchema: t.inputSchema
-            }))
+            tools: TOOLS.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
           }
         };
 
@@ -224,62 +219,40 @@ async function handleMessage(data) {
         const tool = TOOLS.find(t => t.name === params.name);
         if (!tool) {
           return {
-            jsonrpc: '2.0',
-            id,
+            jsonrpc: '2.0', id,
             error: { code: -32601, message: `Unknown tool: ${params.name}` }
           };
         }
-
         const text = await tool.handler(params.arguments || {});
         return {
-          jsonrpc: '2.0',
-          id,
-          result: {
-            content: [{ type: 'text', text }]
-          }
+          jsonrpc: '2.0', id,
+          result: { content: [{ type: 'text', text }] }
         };
       }
 
       default:
         return {
-          jsonrpc: '2.0',
-          id,
+          jsonrpc: '2.0', id,
           error: { code: -32601, message: `Unknown method: ${method}` }
         };
     }
   } catch (err) {
     console.error(`Error handling ${method}:`, err);
     return {
-      jsonrpc: '2.0',
-      id,
-      error: { code: -32603, message: err?.message || 'Internal error' }
+      jsonrpc: '2.0', id,
+      error: { code: -32603, message: err.message || 'Internal error' }
     };
   }
 }
 
-// Railway health endpoint.
-const httpServer = http.createServer((req, res) => {
-  if (req.url === '/health') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      ok: true,
-      musicMcp: true,
-      xiaozhiBridge: Boolean(XIAOZHI_MCP_URL)
-    }));
-    return;
-  }
-  res.writeHead(200, { 'content-type': 'text/plain' });
-  res.end('xiaozhi-music-railway is running\\n');
-});
-httpServer.listen(PORT, HOST, () => {
-  console.log(`[ready] HTTP health on ${HOST}:${PORT}`);
-});
+// ─── WebSocket server ───────────────────────────────────────────
+const wss = new WebSocketServer({ port: PORT, host: HOST });
 
-// Existing inbound music MCP WebSocket server remains available.
-const wss = new WebSocketServer({ server: httpServer });
 wss.on('connection', (ws, req) => {
-  console.log(`[music-connect] ${req.socket.remoteAddress}`);
-  ws.on('message', async raw => {
+  const addr = req.socket.remoteAddress;
+  console.log(`[connect] ${addr}`);
+
+  ws.on('message', async (raw) => {
     let data;
     try {
       data = JSON.parse(raw.toString());
@@ -290,60 +263,21 @@ wss.on('connection', (ws, req) => {
       }));
       return;
     }
+
     const response = await handleMessage(data);
-    if (response) ws.send(JSON.stringify(response));
+    if (response) {
+      ws.send(JSON.stringify(response));
+    }
   });
-  ws.on('close', () => console.log('[music-disconnect]'));
-  ws.on('error', err => console.error('[music-error]', err.message));
+
+  ws.on('close', () => {
+    console.log(`[disconnect] ${addr}`);
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[error] ${addr}:`, err.message);
+  });
 });
 
-// Outbound XiaoZhi bridge: XiaoZhi connects to us by our outbound WebSocket.
-let xiaozhiWs = null;
-let reconnectTimer = null;
-
-function connectToXiaoZhi() {
-  if (!XIAOZHI_MCP_URL) {
-    console.log('[xiaozhi] XIAOZHI_MCP_URL/MCP_ENDPOINT not set; bridge disabled');
-    return;
-  }
-
-  if (xiaozhiWs && (xiaozhiWs.readyState === WebSocket.OPEN ||
-                    xiaozhiWs.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
-
-  console.log('[xiaozhi] Connecting to Xiaozhi MCP endpoint...');
-  xiaozhiWs = new WebSocket(XIAOZHI_MCP_URL);
-
-  xiaozhiWs.on('open', () => {
-    console.log('[xiaozhi] CONNECTED to Xiaozhi MCP endpoint');
-  });
-
-  xiaozhiWs.on('message', async raw => {
-    let data;
-    try {
-      data = JSON.parse(raw.toString());
-    } catch {
-      console.error('[xiaozhi] Invalid JSON received');
-      return;
-    }
-
-    const response = await handleMessage(data);
-    if (response && xiaozhiWs?.readyState === WebSocket.OPEN) {
-      xiaozhiWs.send(JSON.stringify(response));
-    }
-  });
-
-  xiaozhiWs.on('close', () => {
-    console.log('[xiaozhi] Disconnected; reconnecting in 5s');
-    xiaozhiWs = null;
-    clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connectToXiaoZhi, 5000);
-  });
-
-  xiaozhiWs.on('error', err => {
-    console.error('[xiaozhi] WebSocket error:', err.message);
-  });
-}
-
-connectToXiaoZhi();
+console.log(`[ready] wss://${HOST}:${PORT}  |  Music MCP Server (Meting)`);
+console.log(`[ready] Platforms: ${PLATFORMS.join(', ')}`);
