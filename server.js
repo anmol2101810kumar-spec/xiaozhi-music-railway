@@ -1,137 +1,283 @@
 #!/usr/bin/env node
 /**
- * XiaoZhi ↔ Music MCP WebSocket bridge
+ * xiaozhi-music-railway — Real music MCP WebSocket server
  *
- * Connects OUTBOUND to:
- *   1) XiaoZhi MCP endpoint
- *   2) Existing Music MCP WebSocket server
+ * Uses Meting (metowolf/Meting) to search and fetch playable URLs
+ * from Netease, Tencent/QQ, Kugou, and Kuwo music platforms.
  *
- * It transparently forwards MCP JSON-RPC messages between them.
+ * Protocol: MCP JSON-RPC 2.0 over WebSocket
+ * Designed for Railway.app deployment (env PORT)
  */
+import { WebSocketServer } from 'ws';
+import Meting from './lib/meting/meting.js';
 
-import http from "http";
-import WebSocket from "ws";
+// ─── Config ────────────────────────────────────────────────────
+const PORT = parseInt(process.env.PORT || '8765', 10);
+const HOST = process.env.HOST || '0.0.0.0';
 
-const PORT = Number.parseInt(process.env.PORT || "8080", 10);
-const HOST = process.env.HOST || "0.0.0.0";
+// ─── Meting client factory ──────────────────────────────────────
+function createClient(platform) {
+  const meting = new Meting(platform);
+  meting.format(true);
 
-const XIAOZHI_MCP_URL = process.env.XIAOZHI_MCP_URL || "";
-const MUSIC_MCP_URL = process.env.MUSIC_MCP_URL || "";
+  // Optional cookies from env
+  const cookieVar = `METING_${platform.toUpperCase()}_COOKIE`;
+  const cookie = process.env[cookieVar] || process.env.METING_COOKIE;
+  if (cookie) {
+    meting.cookie(cookie);
+  }
 
-if (!XIAOZHI_MCP_URL || !MUSIC_MCP_URL) {
-  console.error("[config] Missing XIAOZHI_MCP_URL or MUSIC_MCP_URL");
-  process.exit(1);
+  return meting;
 }
 
-let xiaozhi = null;
-let music = null;
+// ─── Tool definitions ───────────────────────────────────────────
+const PLATFORMS = ['netease', 'tencent', 'kugou', 'kuwo'];
 
-let xiaozhiConnected = false;
-let musicConnected = false;
-
-function safeSend(ws, data, label) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.log(`[${label}] socket not open; message skipped`);
-    return false;
+const TOOLS = [
+  {
+    name: 'platforms',
+    description: 'List supported music platforms (netease, tencent, kugou, kuwo).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      return JSON.stringify({ ok: true, data: PLATFORMS.map(p => ({
+        code: p,
+        name: { netease: 'NetEase Cloud Music', tencent: 'Tencent QQ Music', kugou: 'KuGou Music', kuwo: 'Kuwo Music' }[p]
+      }))}, null, 2);
+    }
+  },
+  {
+    name: 'search',
+    description: 'Search songs, albums or artists on a specific music platform.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        keyword: { type: 'string', description: 'Search keyword (song/artist name)' },
+        page: { type: 'integer', description: 'Page number', default: 1 },
+        limit: { type: 'integer', description: 'Results per page', default: 20 }
+      },
+      required: ['platform', 'keyword']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const options = {};
+      if (args.page) options.page = args.page;
+      if (args.limit) options.limit = args.limit;
+      const raw = await client.search(args.keyword, options);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
+  },
+  {
+    name: 'song',
+    description: 'Get song details by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Song ID' }
+      },
+      required: ['platform', 'id']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const raw = await client.song(args.id);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
+  },
+  {
+    name: 'url',
+    description: 'Get playable audio URL for a song by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Song ID' },
+        br: { type: 'integer', description: 'Bitrate (e.g. 128, 320)', default: 320 }
+      },
+      required: ['platform', 'id']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const raw = await client.url(args.id, args.br || 320);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
+  },
+  {
+    name: 'album',
+    description: 'Get album details by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Album ID' }
+      },
+      required: ['platform', 'id']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const raw = await client.album(args.id);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
+  },
+  {
+    name: 'artist',
+    description: 'Get artist songs by artist ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Artist ID' },
+        limit: { type: 'integer', description: 'Max results', default: 50 }
+      },
+      required: ['platform', 'id']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const raw = await client.artist(args.id, args.limit || 50);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
+  },
+  {
+    name: 'playlist',
+    description: 'Get playlist details by playlist ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Playlist ID' }
+      },
+      required: ['platform', 'id']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const raw = await client.playlist(args.id);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
+  },
+  {
+    name: 'lyric',
+    description: 'Get song lyrics by song ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Song ID' }
+      },
+      required: ['platform', 'id']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const raw = await client.lyric(args.id);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
+  },
+  {
+    name: 'pic',
+    description: 'Get cover/picture URL by resource ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        platform: { type: 'string', enum: PLATFORMS, description: 'Music platform' },
+        id: { type: 'string', description: 'Picture/resource ID' },
+        size: { type: 'integer', description: 'Image size in pixels', default: 300 }
+      },
+      required: ['platform', 'id']
+    },
+    handler: async (args) => {
+      const client = createClient(args.platform);
+      const raw = await client.pic(args.id, args.size || 300);
+      return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    }
   }
+];
+
+// ─── MCP JSON-RPC handler ───────────────────────────────────────
+async function handleMessage(data) {
+  const { id, method, params = {} } = data;
 
   try {
-    ws.send(data);
-    return true;
+    switch (method) {
+      case 'initialize':
+        return {
+          jsonrpc: '2.0', id,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: { listChanged: true } },
+            serverInfo: { name: 'xiaozhi-music-railway', version: '1.0.0' }
+          }
+        };
+
+      case 'tools/list':
+        return {
+          jsonrpc: '2.0', id,
+          result: {
+            tools: TOOLS.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
+          }
+        };
+
+      case 'tools/call': {
+        const tool = TOOLS.find(t => t.name === params.name);
+        if (!tool) {
+          return {
+            jsonrpc: '2.0', id,
+            error: { code: -32601, message: `Unknown tool: ${params.name}` }
+          };
+        }
+        const text = await tool.handler(params.arguments || {});
+        return {
+          jsonrpc: '2.0', id,
+          result: { content: [{ type: 'text', text }] }
+        };
+      }
+
+      default:
+        return {
+          jsonrpc: '2.0', id,
+          error: { code: -32601, message: `Unknown method: ${method}` }
+        };
+    }
   } catch (err) {
-    console.error(`[${label}] send error:`, err.message);
-    return false;
+    console.error(`Error handling ${method}:`, err);
+    return {
+      jsonrpc: '2.0', id,
+      error: { code: -32603, message: err.message || 'Internal error' }
+    };
   }
 }
 
-function connectMusic() {
-  console.log("[music] Connecting to Music MCP...");
-  const ws = new WebSocket(MUSIC_MCP_URL);
+// ─── WebSocket server ───────────────────────────────────────────
+const wss = new WebSocketServer({ port: PORT, host: HOST });
 
-  music = ws;
+wss.on('connection', (ws, req) => {
+  const addr = req.socket.remoteAddress;
+  console.log(`[connect] ${addr}`);
 
-  ws.on("open", () => {
-    musicConnected = true;
-    console.log("[music] CONNECTED to Music MCP");
-  });
-
-  ws.on("message", (data) => {
-    console.log("[music→xiaozhi]", data.toString().slice(0, 500));
-    safeSend(xiaozhi, data, "xiaozhi");
-  });
-
-  ws.on("close", (code, reason) => {
-    musicConnected = false;
-    console.log(`[music] CLOSED ${code} ${reason?.toString() || ""}`);
-    if (music === ws) music = null;
-    setTimeout(connectMusic, 3000);
-  });
-
-  ws.on("error", (err) => {
-    musicConnected = false;
-    console.error("[music] ERROR:", err.message);
-  });
-}
-
-function connectXiaozhi() {
-  console.log("[xiaozhi] Connecting to XiaoZhi MCP endpoint...");
-  const ws = new WebSocket(XIAOZHI_MCP_URL);
-
-  xiaozhi = ws;
-
-  ws.on("open", () => {
-    xiaozhiConnected = true;
-    console.log("[xiaozhi] CONNECTED to XiaoZhi MCP endpoint");
-  });
-
-  ws.on("message", (data) => {
-    console.log("[xiaozhi→music]", data.toString().slice(0, 500));
-
-    if (!musicConnected) {
-      console.log("[bridge] Music MCP is not connected yet; message skipped");
+  ws.on('message', async (raw) => {
+    let data;
+    try {
+      data = JSON.parse(raw.toString());
+    } catch {
+      ws.send(JSON.stringify({
+        jsonrpc: '2.0', id: null,
+        error: { code: -32700, message: 'Parse error' }
+      }));
       return;
     }
 
-    safeSend(music, data, "music");
+    const response = await handleMessage(data);
+    if (response) {
+      ws.send(JSON.stringify(response));
+    }
   });
 
-  ws.on("close", (code, reason) => {
-    xiaozhiConnected = false;
-    console.log(`[xiaozhi] CLOSED ${code} ${reason?.toString() || ""}`);
-    if (xiaozhi === ws) xiaozhi = null;
-    setTimeout(connectXiaozhi, 3000);
+  ws.on('close', () => {
+    console.log(`[disconnect] ${addr}`);
   });
 
-  ws.on("error", (err) => {
-    xiaozhiConnected = false;
-    console.error("[xiaozhi] ERROR:", err.message);
+  ws.on('error', (err) => {
+    console.error(`[error] ${addr}:`, err.message);
   });
-}
-
-// Simple Railway health endpoint.
-const server = http.createServer((req, res) => {
-  if (req.url === "/health" || req.url === "/") {
-    const body = JSON.stringify({
-      ok: true,
-      xiaozhiConnected,
-      musicConnected
-    });
-
-    res.writeHead(200, {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(body)
-    });
-    res.end(body);
-    return;
-  }
-
-  res.writeHead(404);
-  res.end("Not Found");
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`[ready] HTTP health on ${HOST}:${PORT}`);
-  console.log("[bridge] Starting outbound MCP connections...");
-  connectMusic();
-  connectXiaozhi();
-});
+console.log(`[ready] wss://${HOST}:${PORT}  |  Music MCP Server (Meting)`);
+console.log(`[ready] Platforms: ${PLATFORMS.join(', ')}`);
